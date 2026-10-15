@@ -87,3 +87,20 @@ async def calculate_total_revenue(
         print(f"Database error for {property_id} (tenant: {tenant_id}): {e}")
         # Never fall back to made-up figures: surface the failure instead
         raise
+
+async def get_tenant_properties(tenant_id: str) -> List[Dict[str, Any]]:
+    """
+    Lists the properties that belong to a tenant.
+    """
+    from app.core.database_pool import db_pool
+    from sqlalchemy import text
+
+    if not db_pool.session_factory:
+        await db_pool.initialize()
+
+    async with db_pool.get_session() as session:
+        result = await session.execute(
+            text("SELECT id, name, timezone FROM properties WHERE tenant_id = :tenant_id ORDER BY id"),
+            {"tenant_id": tenant_id},
+        )
+        return [{"id": row.id, "name": row.name, "timezone": row.timezone} for row in result]
