@@ -1,39 +1,29 @@
 from datetime import datetime
 from decimal import Decimal
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
-async def calculate_monthly_revenue(property_id: str, month: int, year: int, db_session=None) -> Decimal:
-    """
-    Calculates revenue for a specific month.
-    """
-
+def _month_bounds(month: int, year: int):
+    """Naive [start, end) bounds of a calendar month, interpreted in the property's local time."""
     start_date = datetime(year, month, 1)
     if month < 12:
         end_date = datetime(year, month + 1, 1)
     else:
         end_date = datetime(year + 1, 1, 1)
-        
-    print(f"DEBUG: Querying revenue for {property_id} from {start_date} to {end_date}")
+    return start_date, end_date
 
-    # SQL Simulation (This would be executed against the actual DB)
-    query = """
-        SELECT SUM(total_amount) as total
-        FROM reservations
-        WHERE property_id = $1
-        AND tenant_id = $2
-        AND check_in_date >= $3
-        AND check_in_date < $4
+async def calculate_monthly_revenue(property_id: str, tenant_id: str, month: int, year: int) -> Decimal:
     """
-    
-    # In production this query executes against a database session.
-    # result = await db.fetch_val(query, property_id, tenant_id, start_date, end_date)
-    # return result or Decimal('0')
-    
-    return Decimal('0') # Placeholder for now until DB connection is finalized
+    Calculates revenue for a specific month, using the property's local timezone.
+    """
+    result = await calculate_total_revenue(property_id, tenant_id, month=month, year=year)
+    return Decimal(result["total"])
 
-async def calculate_total_revenue(property_id: str, tenant_id: str) -> Dict[str, Any]:
+async def calculate_total_revenue(
+    property_id: str, tenant_id: str, month: Optional[int] = None, year: Optional[int] = None
+) -> Dict[str, Any]:
     """
-    Aggregates revenue from database.
+    Aggregates revenue from database, optionally for a single month.
+    Month boundaries follow the property's timezone, not UTC.
     """
     try:
         # Reuse the shared database pool, initializing it once
@@ -47,20 +37,29 @@ async def calculate_total_revenue(property_id: str, tenant_id: str) -> Dict[str,
                 # Use SQLAlchemy text for raw SQL
                 from sqlalchemy import text
                 
-                query = text("""
+                params = {"property_id": property_id, "tenant_id": tenant_id}
+                period_filter = ""
+                if month and year:
+                    # Convert check-in to property-local time before comparing with month bounds
+                    params["start_date"], params["end_date"] = _month_bounds(month, year)
+                    period_filter = """
+                        AND (r.check_in_date AT TIME ZONE p.timezone) >= :start_date
+                        AND (r.check_in_date AT TIME ZONE p.timezone) < :end_date
+                    """
+                
+                query = text(f"""
                     SELECT 
-                        property_id,
-                        SUM(total_amount) as total_revenue,
+                        r.property_id,
+                        SUM(r.total_amount) as total_revenue,
                         COUNT(*) as reservation_count
-                    FROM reservations 
-                    WHERE property_id = :property_id AND tenant_id = :tenant_id
-                    GROUP BY property_id
+                    FROM reservations r
+                    JOIN properties p ON p.id = r.property_id AND p.tenant_id = r.tenant_id
+                    WHERE r.property_id = :property_id AND r.tenant_id = :tenant_id
+                    {period_filter}
+                    GROUP BY r.property_id
                 """)
                 
-                result = await session.execute(query, {
-                    "property_id": property_id, 
-                    "tenant_id": tenant_id
-                })
+                result = await session.execute(query, params)
                 row = result.fetchone()
                 
                 if row:
